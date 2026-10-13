@@ -1,26 +1,422 @@
 @import "tailwindcss";
 
+/*
+ * Colours are sampled from the reference app: a deep violet night shift, a hot
+ * pink day shift, slate date bar, white/slate banded rows.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+  --paper: #ecebf3;
+  --surface: #ffffff;
+  --ink: #17132a;
+  --muted: #655f7c;
+  --line: #dcd8ea;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --night: #5e35b1;
+  --day: #e9317b;
+  --slate: #5f7680;
+  --cream: #fff4b0;
+
+  --screen-bg: #ffffff;
+  --row-light: #ffffff;
+  --grid-num: #0e0b1a;
+
+  /* Row text colours (label and numbers share one colour, as in the app). */
+  --c-blue: #1c2fe0;
+  --c-orange: #e5532b;
+  --c-red: #d9432a;
+  --c-pink: #d62f6b;
+  --c-brick: #9f1f2f;
+  --c-mint: #d6f9d2;
+  --c-white: #ffffff;
+
+  --ok: #14703f;
+  --warn: #8a5200;
+  --bad: #b3261e;
+  --wait: #4a4466;
+  --ok-bg: #e2f4ea;
+  --warn-bg: #fdf0d6;
+  --bad-bg: #fde7e4;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --paper: #0f0c1a;
+    --surface: #1a1630;
+    --ink: #f1eefb;
+    --muted: #a8a1c2;
+    --line: #322b50;
+
+    --night: #6f48c8;
+    --day: #ee3f86;
+    --slate: #46585f;
+    --cream: #fff0a0;
+
+    --screen-bg: #151124;
+    --row-light: #1b1630;
+    --grid-num: #f4f1ff;
+
+    --c-blue: #93a3ff;
+    --c-orange: #ff9368;
+    --c-red: #ff8f78;
+    --c-pink: #ff82b0;
+    --c-brick: #ff909c;
+
+    --ok: #6fdc9c;
+    --warn: #f2c260;
+    --bad: #ff9a90;
+    --wait: #c5bfe0;
+    --ok-bg: #12301f;
+    --warn-bg: #36280a;
+    --bad-bg: #3d1512;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-night: var(--night);
+  --color-day: var(--day);
+  --font-sans: var(--font-geist-sans);
+  --font-serif: var(--font-noto-serif);
 }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family:
+    var(--font-geist-sans), var(--font-noto-sans-khmer), system-ui, sans-serif;
+  /* Keep content clear of notches in landscape. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* ---- result screen ------------------------------------------------------
+ * Every size inside .screen is in container-query units (cqw), so the layout
+ * scales as one picture from a 320px phone to a tablet, exactly like the
+ * reference app. clamp() keeps text legible at the extremes.
+ */
+.screen {
+  container-type: inline-size;
+  width: 100%;
+  max-width: 30rem;
+  margin-inline: auto;
+  overflow: hidden;
+  border-radius: 1.5rem;
+  background: var(--screen-bg);
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 30px -18px rgb(30 20 70 / 0.45);
+}
+
+.serif {
+  font-family:
+    var(--font-noto-serif), var(--font-noto-serif-khmer), Georgia, serif;
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+.screen-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 3cqw;
+  min-height: 15cqw;
+  padding: 3cqw 4.5cqw;
+  background: var(--accent);
+  color: #fff;
+}
+.screen-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-size: clamp(1.05rem, 5.6cqw, 1.6rem);
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  flex-shrink: 0;
+  max-width: 55%;
+  padding: 0.3em 0.9em;
+  border-radius: 999px;
+  /* Always a white pill with dark text, whatever the theme. */
+  background: #ffffff;
+  color: #2a2250;
+  font-size: 0.85rem;
+  font-size: clamp(0.85rem, 4cqw, 1.05rem);
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+.status-chip[data-tone="ok"] {
+  color: #14703f;
+}
+.status-chip[data-tone="warn"] {
+  color: #8a5200;
+}
+.status-chip[data-tone="bad"] {
+  color: #b3261e;
+}
+
+.sub-bar {
+  display: flex;
+  align-items: center;
+  gap: 3cqw;
+  min-height: 14cqw;
+  padding: 2cqw 4.5cqw 2cqw 2cqw;
+  background: var(--slate);
+}
+.sub-pill {
+  flex-shrink: 0;
+  padding: 2.4cqw 4.2cqw;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.9rem;
+  font-size: clamp(0.85rem, 4.5cqw, 1.3rem);
+  font-weight: 500;
+  line-height: 1.5;
+}
+.sub-date {
+  flex: 1;
+  text-align: center;
+  color: var(--cream);
+  font-size: 1.05rem;
+  font-size: clamp(1rem, 6cqw, 1.75rem);
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.row {
+  display: grid;
+  grid-template-columns: 36% 1fr;
+  align-items: center;
+  min-height: 14.6cqw;
+  padding: 1.5cqw 3.5cqw 1.5cqw 4.5cqw;
+  background: var(--row-bg);
+  color: var(--row-fg);
+}
+.row[data-band="light"] {
+  --row-bg: var(--row-light);
+}
+.row[data-band="slate"] {
+  --row-bg: var(--slate);
+}
+.row-label {
+  font-size: 1rem;
+  font-size: clamp(0.9rem, 4.7cqw, 1.5rem);
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.row-nums {
+  display: flex;
+  justify-content: space-around;
+  gap: 1.5cqw;
+  font-size: 1.15rem;
+  font-size: clamp(1.05rem, 5.9cqw, 1.95rem);
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 4cqw;
+  margin: 3.5cqw 3cqw 2cqw;
+  min-height: 17cqw;
+  padding: 3cqw 4.5cqw 3cqw 3.5cqw;
+  border-radius: 5cqw;
+  background: var(--accent);
+  color: #fff;
+}
+.banner-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 10.5cqw;
+  height: 10.5cqw;
+  border-radius: 2.6cqw;
+  background: rgb(255 255 255 / 0.2);
+}
+.banner-icon svg {
+  width: 60%;
+  height: 60%;
+}
+.banner-title {
+  flex: 1;
+  margin: 0;
+  font-size: 1rem;
+  font-size: clamp(1rem, 4.6cqw, 1.45rem);
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.lo-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  padding: 1cqw 1cqw 3cqw;
+}
+.lo-cell {
+  display: grid;
+  place-items: center;
+  min-height: 12.5cqw;
+  color: var(--grid-num);
+  font-size: 1.15rem;
+  font-size: clamp(1.05rem, 5.9cqw, 1.95rem);
+  font-weight: 700;
+}
+
+.pending-num {
+  opacity: 0.55;
+  letter-spacing: 0.12em;
+}
+
+/* A number that just arrived: one short highlight, nothing else moves. */
+@keyframes arrive {
+  from {
+    background: rgb(255 214 0 / 0.55);
+  }
+  to {
+    background: transparent;
+  }
+}
+.arrived {
+  animation: arrive 1.8s ease-out;
+  border-radius: 0.4rem;
+}
+
+@keyframes pulse-dot {
+  50% {
+    opacity: 0.3;
+  }
+}
+.live-dot {
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arrived,
+  .live-dot {
+    animation: none;
+  }
+}
+
+:focus-visible {
+  outline: 3px solid var(--night);
+  outline-offset: 2px;
+}
+@media (prefers-color-scheme: dark) {
+  :focus-visible {
+    outline-color: #c9b6ff;
+  }
+}
+
+
+
+/* ---- guess panel ("ទាយ") -----------------------------------------------
+ * Same visual language as the result screens. Each column is its own
+ * container, so type scales with the column, not the page.
+ */
+.guess {
+  width: 100%;
+  max-width: 30rem;
+  margin-inline: auto;
+}
+.guess-title {
+  display: inline-block;
+  margin: 0 0 0.6rem;
+  padding: 0.1rem 1.1rem;
+  border-radius: 999px;
+  background: var(--slate);
+  color: var(--cream);
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.7;
+}
+.guess-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.guess-col {
+  container-type: inline-size;
+  overflow: hidden;
+  border-radius: 1.25rem;
+  border: 1px solid var(--line);
+  background: var(--screen-bg);
+}
+.guess-head {
+  display: flex;
+  align-items: center;
+  gap: 2.5cqw;
+  padding: 2.5cqw 4cqw;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.95rem;
+  font-size: clamp(0.9rem, 5.2cqw, 1.35rem);
+  font-weight: 600;
+  line-height: 1.6;
+}
+.guess-icon {
+  display: block;
+  width: 1.25em;
+  height: 1.25em;
+}
+.guess-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2cqw;
+  padding: 1.5cqw 4cqw;
+  min-height: 11cqw;
+  background: var(--row-bg);
+  color: var(--row-fg);
+}
+.guess-row[data-band="light"] {
+  --row-bg: var(--row-light);
+  --row-fg: var(--accent);
+}
+.guess-row[data-band="slate"] {
+  --row-bg: var(--slate);
+  --row-fg: #ffffff;
+}
+.guess-pos {
+  font-size: 0.85rem;
+  font-size: clamp(0.8rem, 4.4cqw, 1.2rem);
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.guess-num {
+  font-size: 1.15rem;
+  font-size: clamp(1.1rem, 7.6cqw, 2.2rem);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+}
+
+@media (min-width: 64rem) {
+  .guess {
+    max-width: none;
+  }
+  .guess-title {
+    margin-left: max(0px, calc(50% - 30rem - 0.625rem));
+  }
+  .guess-grid {
+    grid-template-columns: repeat(2, minmax(0, 30rem));
+    justify-content: center;
+    gap: 1.25rem;
+  }
+}
+
+
+
