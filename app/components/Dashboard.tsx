@@ -117,9 +117,13 @@ export default function Dashboard({
       if (document.hidden) return arm(5_000);
       try {
         const query = selected ? `?date=${selected}` : "";
+        // A request that never answers would otherwise stall the loop.
         const res = await fetch(`/api/results${query}`, {
           cache: "no-store",
-          signal: controller.signal,
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(20_000),
+          ]),
         });
         const body = await res.json();
         if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
@@ -133,9 +137,9 @@ export default function Dashboard({
         setFailed(false);
         arm(payload.pollHintMs);
       } catch {
-        if (stopped || controller.signal.aborted) return;
+        if (stopped) return;
         setFailed(true);
-        arm(15_000);
+        arm(10_000);
       }
     }
 

@@ -1,5 +1,6 @@
 import { buildShiftView, type ShiftView } from "./derive.ts";
 import { HISTORY_DAYS, pollerStatus } from "./poller.ts";
+import { STATS_DAYS } from "./predict.ts";
 import { LEAD_MS, planFor } from "./schedule.ts";
 import type { ShiftPrediction } from "./predict.ts";
 import { ensurePrediction, refreshDraw } from "./service.ts";
@@ -80,14 +81,52 @@ async function freshenIfDue(date: string, now: Date): Promise<void> {
   );
 }
 
+/**
+ * Without a running poller (serverless) the history behind the guess numbers
+ * is collected by visitors: each call fills in a few missing earlier days.
+ */
+async function backfillSome(now: Date): Promise<void> {
+  if (pollerStatus().running) return;
+  const g = globalThis as typeof globalThis & { __lotteryBackfillAt?: number };
+  if (Date.now() - (g.__lotteryBackfillAt ?? 0) < 5_000) return;
+  g.__lotteryBackfillAt = Date.now();
+
+  const todo: { region: Region; date: string }[] = [];
+  for (const date of recentDates(STATS_DAYS, now).slice(1)) {
+    const record = await readDay(date);
+    for (const region of REGIONS) {
+      if (record[region]?.status !== "complete") todo.push({ region, date });
+    }
+    if (todo.length >= 4) break;
+  }
+  await Promise.race([
+    Promise.all(
+      todo.map((job) =>
+        refreshDraw(job.region, job.date, { minIntervalMs: 10 * 60_000 }),
+      ),
+    ),
+    new Promise((resolve) => setTimeout(resolve, 8_000)),
+  ]);
+}
+
 export async function buildResults(date: string): Promise<ResultsPayload> {
   const now = new Date();
-  await freshenIfDue(date, now);
+  // Fresh data is a bonus: if fetching or guess generation fails, the stored
+  // results must still be served.
+  await freshenIfDue(date, now).catch((err) =>
+    console.error("[lottery] refresh on request failed:", err),
+  );
 
-  const [predDay, predNight] = await Promise.all([
-    ensurePrediction("day", date),
-    ensurePrediction("night", date),
-  ]);
+  await backfillSome(now).catch((err) =>
+    console.error("[lottery] backfill failed:", err),
+  );
+
+  const guess = (shift: "day" | "night") =>
+    ensurePrediction(shift, date).catch((err) => {
+      console.error(`[lottery] guess ${shift} failed:`, err);
+      return null;
+    });
+  const [predDay, predNight] = await Promise.all([guess("day"), guess("night")]);
 
   const record = await readDay(date);
   const day = buildShiftView("day", date, record.mn);

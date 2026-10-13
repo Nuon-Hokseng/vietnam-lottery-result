@@ -9,6 +9,9 @@ export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (process.env.NEXT_PHASE === "phase-production-build") return;
   if (process.env.LOTTERY_POLLER === "off") return;
+  // Serverless functions are frozen between requests, so timers are useless
+  // there. Results are refreshed by incoming requests instead (lib/lottery/api).
+  if (process.env.VERCEL) return;
 
   const { startPoller } = await import("./lib/lottery/poller");
   startPoller();

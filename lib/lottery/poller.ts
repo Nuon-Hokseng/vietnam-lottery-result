@@ -14,7 +14,16 @@ interface JobState {
   nextAt: number;
   attempts: number;
   done: boolean;
+  /** Consecutive failed rounds (every site down, or an internal error). */
+  failures: number;
 }
+
+/** 10 s, 20 s, 40 s ... capped at 5 min. */
+const backoffMs = (failures: number) =>
+  Math.min(5 * 60_000, 10_000 * 2 ** Math.max(0, failures - 1));
+
+/** A tick that has not finished after this long is abandoned. */
+const TICK_WATCHDOG_MS = 120_000;
 
 interface PollerRuntime {
   startedAt: string;
@@ -51,28 +60,49 @@ async function tick(rt: PollerRuntime): Promise<void> {
     for (const region of REGIONS) {
       const key = `${date}:${region}`;
       const state =
-        rt.jobs.get(key) ?? { nextAt: 0, attempts: 0, done: false };
+        rt.jobs.get(key) ??
+        { nextAt: 0, attempts: 0, done: false, failures: 0 };
       rt.jobs.set(key, state);
       if (state.done || Date.now() < state.nextAt) continue;
 
-      const stored = (await readDay(date))[region];
-      const plan = planFor(date, region, stored, new Date(), state.attempts);
+      // One broken job (unreadable file, full disk, bad data) must never stop
+      // the others, so every job runs inside its own try/catch with backoff.
+      try {
+        const stored = (await readDay(date))[region];
+        const plan = planFor(date, region, stored, new Date(), state.attempts);
 
-      if (!plan.fetchNow) {
-        if (plan.recheckInMs === null) state.done = true;
-        else state.nextAt = Date.now() + plan.recheckInMs;
-        continue;
-      }
-      if (isBackfill) {
-        if (backfillBudget <= 0) continue; // next tick
-        backfillBudget -= 1;
-      }
+        if (!plan.fetchNow) {
+          if (plan.recheckInMs === null) state.done = true;
+          else state.nextAt = Date.now() + plan.recheckInMs;
+          continue;
+        }
+        if (isBackfill) {
+          if (backfillBudget <= 0) continue; // next tick
+          backfillBudget -= 1;
+        }
 
-      const fresh = await refreshDraw(region, date);
-      state.attempts += 1;
-      const after = planFor(date, region, fresh, new Date(), state.attempts);
-      if (after.recheckInMs === null) state.done = true;
-      else state.nextAt = Date.now() + after.recheckInMs;
+        const fresh = await refreshDraw(region, date);
+        state.attempts += 1;
+
+        const anySiteAnswered = fresh.sources.some((s) => s.ok);
+        state.failures = anySiteAnswered ? 0 : state.failures + 1;
+
+        const after = planFor(date, region, fresh, new Date(), state.attempts);
+        if (after.recheckInMs === null) {
+          state.done = true;
+        } else {
+          // Never hammer sites that are all failing: back off, then resume.
+          const wait = anySiteAnswered
+            ? after.recheckInMs
+            : Math.max(after.recheckInMs, backoffMs(state.failures));
+          state.nextAt = Date.now() + wait;
+        }
+      } catch (err) {
+        state.failures += 1;
+        state.nextAt = Date.now() + backoffMs(state.failures);
+        rt.lastError = `${key}: ${err instanceof Error ? err.message : String(err)}`;
+        console.error(`[lottery] job ${key} failed:`, rt.lastError);
+      }
     }
   }
 
@@ -95,8 +125,18 @@ export function startPoller(): void {
 
   const loop = async () => {
     try {
-      await tick(rt);
-      rt.lastError = undefined;
+      // Watchdog: if a tick hangs (stuck I/O), carry on with a fresh one
+      // instead of freezing the poller forever.
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        tick(rt),
+        new Promise<void>((_, reject) => {
+          watchdog = setTimeout(
+            () => reject(new Error("tick exceeded watchdog")),
+            TICK_WATCHDOG_MS,
+          );
+        }),
+      ]).finally(() => clearTimeout(watchdog));
     } catch (err) {
       rt.lastError = err instanceof Error ? err.message : String(err);
       console.error("[lottery] poller tick failed:", rt.lastError);
