@@ -122,7 +122,29 @@ export async function backfillSome(now: Date = new Date()): Promise<void> {
   );
 }
 
-export async function buildResults(date: string): Promise<ResultsPayload> {
+/**
+ * Many viewers poll at once (every 10 s each). Payloads are shared for 2 s and
+ * concurrent callers await the same build, so N viewers cost one build.
+ */
+const SHARE_MS = 2_000;
+const gShare = globalThis as typeof globalThis & {
+  __lotteryShared?: Map<string, { at: number; promise: Promise<ResultsPayload> }>;
+};
+const shared = (gShare.__lotteryShared ??= new Map());
+
+export function buildResults(date: string): Promise<ResultsPayload> {
+  const hit = shared.get(date);
+  if (hit && Date.now() - hit.at < SHARE_MS) return hit.promise;
+  const promise = buildResultsUncached(date);
+  shared.set(date, { at: Date.now(), promise });
+  // A failed build must not be served again.
+  promise.catch(() => {
+    if (shared.get(date)?.promise === promise) shared.delete(date);
+  });
+  return promise;
+}
+
+async function buildResultsUncached(date: string): Promise<ResultsPayload> {
   const now = new Date();
   const dates = recentDates(HISTORY_DAYS, now);
 

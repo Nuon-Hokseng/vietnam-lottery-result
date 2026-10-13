@@ -19,6 +19,13 @@ npm test         # parsers, cross-checking, scheduling, screenshot equality
 - **Sources** (`lib/lottery/sources.ts`): minhngoc.net.vn, az24.vn, xsmn.mobi,
   ngaydep.com. az24.vn and xsmn.mobi share a backend, so they count as one
   family; a result is *confirmed* only when two families agree on every number.
+- **Fetch strategy** (`sources.ts`): all sites are queried at once and the call
+  returns as soon as two site families agree, aborting the rest. If only one
+  family has answered it waits 2.5 s for a confirmation, then returns the
+  result as unconfirmed (the next poll upgrades it). A site that fails 3 times
+  in a row is skipped for 15 s, doubling to 5 min, so a dead site costs
+  nothing. Concurrent viewers share one build of each payload for 2 s, finished
+  past days are CDN-cached, and the browser caches and prefetches every day.
 - **Cleaning** (`parsers.ts`, `verify.ts`): only exact-length digit strings are
   accepted, a page showing another date is rejected, and a failed fetch never
   overwrites a finished result.

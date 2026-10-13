@@ -399,3 +399,108 @@ test("guess uses only earlier days, needs enough history, and ignores the target
   );
   assert.equal(predictShift("night", "2026-09-05", records), null); // too little history
 });
+
+// ---- fetch strategy: early exit and circuit breaker --------------------------
+
+import { fetchAllSources, resetSourceHealth } from "../lib/lottery/sources.ts";
+
+const FIXTURE_FOR: Record<string, string> = {
+  minhngoc: "minhngoc-mb-2026-10-12",
+  az24: "az24-mb-2026-10-12",
+  "xsmn-mobi": "xsmn-mobi-mb-2026-10-12",
+  ngaydep: "ngaydep-mb-2026-10-12",
+};
+
+/** A fake network: each site answers after `delays[id]` ms, or fails. */
+function fakeFetcher(
+  delays: Record<string, number>,
+  failing: string[] = [],
+  calls: string[] = [],
+) {
+  return (s: Source, region: Region, date: string, signal?: AbortSignal) =>
+    new Promise<SourceReport>((resolve) => {
+      calls.push(s.id);
+      const done = (r: SourceReport) => resolve(r);
+      const timer = setTimeout(() => {
+        if (failing.includes(s.id)) {
+          done({
+            id: s.id, name: s.name, family: s.family, priority: s.priority,
+            ok: false, error: "HTTP 503", fetchedAt: "", durationMs: delays[s.id],
+          });
+        } else {
+          done(report(s.id, region, date, FIXTURE_FOR[s.id]));
+        }
+      }, delays[s.id]);
+      signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        done({
+          id: s.id, name: s.name, family: s.family, priority: s.priority,
+          ok: false, error: "not needed", fetchedAt: "", durationMs: 0,
+        });
+      });
+    });
+}
+
+test("returns as soon as two site families agree; hung sites are not awaited", async () => {
+  resetSourceHealth();
+  const started = Date.now();
+  const reports = await fetchAllSources("mb", D, {
+    fetcher: fakeFetcher({ minhngoc: 20, az24: 40, "xsmn-mobi": 6000, ngaydep: 6000 }),
+  });
+  assert.ok(Date.now() - started < 1000, "must not wait for the hung sites");
+  const draw = mergeReports("mb", D, reports, undefined, NOW);
+  assert.equal(draw.status, "complete");
+  assert.equal(draw.verification, "verified");
+  assert.equal(reports.length, 4); // every site is still accounted for
+  assert.equal(reports.find((r) => r.id === "ngaydep")?.ok, false);
+});
+
+test("same-backend sites alone do not trigger an early exit", async () => {
+  resetSourceHealth();
+  const started = Date.now();
+  const reports = await fetchAllSources("mb", D, {
+    // az24 + mobi answer first (one family); minhngoc arrives later.
+    fetcher: fakeFetcher({ az24: 10, "xsmn-mobi": 10, minhngoc: 150, ngaydep: 6000 }),
+  });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 140 && elapsed < 1500, `waited for a second family (${elapsed}ms)`);
+  assert.equal(mergeReports("mb", D, reports, undefined, NOW).verification, "verified");
+});
+
+test("a site that keeps failing is skipped (circuit breaker)", async () => {
+  resetSourceHealth();
+  const calls: string[] = [];
+  const fetcher = fakeFetcher(
+    { minhngoc: 5, az24: 5, "xsmn-mobi": 5, ngaydep: 5 },
+    ["ngaydep"],
+    calls,
+  );
+  // ngaydep fails three rounds in a row (the breaker opens on the 3rd). The
+  // other sites are slower than its failure so it is always consulted first.
+  const slow = fakeFetcher(
+    { minhngoc: 60, az24: 60, "xsmn-mobi": 60, ngaydep: 5 },
+    ["ngaydep"],
+    calls,
+  );
+  for (let i = 0; i < 3; i++) await fetchAllSources("mb", D, { fetcher: slow });
+  calls.length = 0;
+  const reports = await fetchAllSources("mb", D, { fetcher });
+  assert.ok(!calls.includes("ngaydep"), "open breaker => not requested");
+  assert.equal(reports.find((r) => r.id === "ngaydep")?.error, "skipped while failing");
+  resetSourceHealth();
+});
+
+test("one unconfirmed family: waits only the grace period, then returns it", async () => {
+  resetSourceHealth();
+  const started = Date.now();
+  const reports = await fetchAllSources("mb", D, {
+    graceMs: 120,
+    // Only az24 + mobi (one family) answer; the other families hang.
+    fetcher: fakeFetcher({ az24: 10, "xsmn-mobi": 10, minhngoc: 6000, ngaydep: 6000 }),
+  });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 100 && elapsed < 1500, `returned after grace (${elapsed}ms)`);
+  const draw = mergeReports("mb", D, reports, undefined, NOW);
+  assert.equal(draw.status, "complete");
+  assert.equal(draw.verification, "single");
+});
