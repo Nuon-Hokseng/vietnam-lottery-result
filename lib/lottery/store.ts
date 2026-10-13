@@ -165,6 +165,39 @@ export async function readDay(date: string): Promise<DayRecord> {
   return cached ? { ...cached, date } : { date };
 }
 
+/**
+ * Read several days at once. On Redis this is a single MGET round trip, which
+ * matters on serverless where each request to the database costs tens of ms.
+ */
+export async function readDays(
+  dates: string[],
+): Promise<Record<string, DayRecord>> {
+  const out: Record<string, DayRecord> = {};
+  let fetched: (DayRecord | undefined)[] | undefined;
+
+  try {
+    if (useRedis) {
+      const raw = await redis<(string | null)[]>([
+        "MGET",
+        ...dates.map(redisKey),
+      ]);
+      fetched = raw.map((r) => (r ? (JSON.parse(r) as DayRecord) : undefined));
+    } else {
+      fetched = await Promise.all(dates.map((d) => readBackend(d)));
+    }
+  } catch (err) {
+    console.error("[lottery] batch read failed:", (err as Error).message);
+  }
+
+  dates.forEach((date, i) => {
+    const stored = fetched?.[i];
+    const cached = memory.get(date);
+    const record = stored ?? cached;
+    out[date] = record ? { ...record, date } : { date };
+  });
+  return out;
+}
+
 /** Read-modify-write one day. Writes for a day are serialised. */
 function updateDay(
   date: string,

@@ -1,17 +1,21 @@
 import { buildShiftView, type ShiftView } from "./derive.ts";
 import { HISTORY_DAYS, pollerStatus } from "./poller.ts";
-import { STATS_DAYS } from "./predict.ts";
+import { STATS_DAYS, type ShiftPrediction } from "./predict.ts";
 import { LEAD_MS, planFor } from "./schedule.ts";
-import type { ShiftPrediction } from "./predict.ts";
 import { ensurePrediction, refreshDraw } from "./service.ts";
-import { readDay } from "./store.ts";
+import { readDays } from "./store.ts";
 import {
   drawInstant,
   isValidDateKey,
   recentDates,
   vnDateKey,
 } from "./time.ts";
-import type { DrawStatus, Region, Verification } from "./types.ts";
+import type {
+  DayRecord,
+  DrawStatus,
+  Region,
+  Verification,
+} from "./types.ts";
 
 export interface HistoryEntry {
   date: string;
@@ -33,6 +37,8 @@ export interface ResultsPayload {
   drawsAt: { day: string; night: string };
   /** True while a result on the selected date is being released. */
   live: boolean;
+  /** True when this payload can never change again (a finished past day). */
+  final: boolean;
   /** Suggested client refresh interval. */
   pollHintMs: number;
   poller: ReturnType<typeof pollerStatus>;
@@ -59,16 +65,20 @@ const REGIONS: Region[] = ["mn", "mb"];
 
 /**
  * If the poller is not alive (serverless, or just restarted) a viewer still
- * triggers a fetch for any draw that is due. Fetches are shared with the
- * poller and throttled, so this never doubles the load.
+ * triggers a fetch for any draw that is due. Finished days need no work at
+ * all. Fetches are shared with the poller and throttled. Returns true when a
+ * fetch ran, so the caller knows to re-read.
  */
-async function freshenIfDue(date: string, now: Date): Promise<void> {
+async function freshenIfDue(
+  date: string,
+  record: DayRecord,
+  now: Date,
+): Promise<boolean> {
   const isToday = date === vnDateKey(now);
-  await Promise.all(
+  const ran = await Promise.all(
     REGIONS.map(async (region) => {
-      const stored = (await readDay(date))[region];
-      const plan = planFor(date, region, stored, now, 0);
-      if (!plan.fetchNow || plan.recheckInMs === null) return;
+      const plan = planFor(date, region, record[region], now, 0);
+      if (!plan.fetchNow || plan.recheckInMs === null) return false;
       // Today: at most one fetch per 10 s. Past days: follow the backfill pace.
       const minIntervalMs = isToday
         ? Math.min(plan.recheckInMs, 10_000)
@@ -77,77 +87,92 @@ async function freshenIfDue(date: string, now: Date): Promise<void> {
         refreshDraw(region, date, { minIntervalMs }),
         new Promise((resolve) => setTimeout(resolve, 9_000)),
       ]);
+      return true;
     }),
   );
+  return ran.some(Boolean);
 }
 
 /**
  * Without a running poller (serverless) the history behind the guess numbers
  * is collected by visitors: each call fills in a few missing earlier days.
+ * Meant to run after the response has been sent (see the route handler).
  */
-async function backfillSome(now: Date): Promise<void> {
+export async function backfillSome(now: Date = new Date()): Promise<void> {
   if (pollerStatus().running) return;
   const g = globalThis as typeof globalThis & { __lotteryBackfillAt?: number };
   if (Date.now() - (g.__lotteryBackfillAt ?? 0) < 5_000) return;
   g.__lotteryBackfillAt = Date.now();
 
+  const dates = recentDates(STATS_DAYS, now).slice(1);
+  const records = await readDays(dates);
   const todo: { region: Region; date: string }[] = [];
-  for (const date of recentDates(STATS_DAYS, now).slice(1)) {
-    const record = await readDay(date);
+  for (const date of dates) {
     for (const region of REGIONS) {
-      if (record[region]?.status !== "complete") todo.push({ region, date });
+      if (records[date]?.[region]?.status !== "complete") {
+        todo.push({ region, date });
+      }
     }
     if (todo.length >= 4) break;
   }
-  await Promise.race([
-    Promise.all(
-      todo.map((job) =>
-        refreshDraw(job.region, job.date, { minIntervalMs: 10 * 60_000 }),
-      ),
+  await Promise.all(
+    todo.map((job) =>
+      refreshDraw(job.region, job.date, { minIntervalMs: 10 * 60_000 }),
     ),
-    new Promise((resolve) => setTimeout(resolve, 8_000)),
-  ]);
+  );
 }
 
 export async function buildResults(date: string): Promise<ResultsPayload> {
   const now = new Date();
+  const dates = recentDates(HISTORY_DAYS, now);
+
+  // One batched read for the whole week (a single Redis round trip).
+  const week = await readDays(dates);
+  let record: DayRecord = week[date] ?? { date };
+
   // Fresh data is a bonus: if fetching or guess generation fails, the stored
   // results must still be served.
-  await freshenIfDue(date, now).catch((err) =>
-    console.error("[lottery] refresh on request failed:", err),
-  );
+  try {
+    if (await freshenIfDue(date, record, now)) {
+      record = (await readDays([date]))[date] ?? record;
+      week[date] = record;
+    }
+  } catch (err) {
+    console.error("[lottery] refresh on request failed:", err);
+  }
 
-  await backfillSome(now).catch((err) =>
-    console.error("[lottery] backfill failed:", err),
-  );
-
-  const guess = (shift: "day" | "night") =>
-    ensurePrediction(shift, date).catch((err) => {
+  const guess = async (shift: "day" | "night") => {
+    const stored = record.predictions?.[shift];
+    if (stored) return stored;
+    try {
+      return await ensurePrediction(shift, date);
+    } catch (err) {
       console.error(`[lottery] guess ${shift} failed:`, err);
       return null;
-    });
-  const [predDay, predNight] = await Promise.all([guess("day"), guess("night")]);
+    }
+  };
+  const [predDay, predNight] = await Promise.all([
+    guess("day"),
+    guess("night"),
+  ]);
 
-  const record = await readDay(date);
   const day = buildShiftView("day", date, record.mn);
   const night = buildShiftView("night", date, record.mb);
 
-  const history: HistoryEntry[] = await Promise.all(
-    recentDates(HISTORY_DAYS, now).map(async (d) => {
-      const r = d === date ? record : await readDay(d);
-      return {
-        date: d,
-        day: {
-          status: r.mn?.status ?? "pending",
-          verification: r.mn?.verification ?? "pending",
-        },
-        night: {
-          status: r.mb?.status ?? "pending",
-          verification: r.mb?.verification ?? "pending",
-        },
-      };
-    }),
-  );
+  const history: HistoryEntry[] = dates.map((d) => {
+    const r = week[d];
+    return {
+      date: d,
+      day: {
+        status: r?.mn?.status ?? "pending",
+        verification: r?.mn?.verification ?? "pending",
+      },
+      night: {
+        status: r?.mb?.status ?? "pending",
+        verification: r?.mb?.verification ?? "pending",
+      },
+    };
+  });
 
   const today = vnDateKey(now);
   const unfinished = day.status !== "complete" || night.status !== "complete";
@@ -177,6 +202,7 @@ export async function buildResults(date: string): Promise<ResultsPayload> {
       night: drawInstant(date, "mb").toISOString(),
     },
     live: releasing,
+    final: date < today && !unfinished,
     pollHintMs: releasing ? 10_000 : date === today && unfinished ? 30_000 : 60_000,
     poller: pollerStatus(),
   };

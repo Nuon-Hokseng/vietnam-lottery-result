@@ -95,7 +95,10 @@ export default function Dashboard({
   initialDate?: string | null;
 }) {
   const [selected, setSelected] = useState<string | null>(initialDate); // null = today
-  const [data, setData] = useState<ResultsPayload | null>(null);
+  // Last payload received, plus every day seen so far. Switching to a day
+  // that is already cached shows it instantly while it refreshes underneath.
+  const [latestData, setLatestData] = useState<ResultsPayload | null>(null);
+  const [cache, setCache] = useState<Record<string, ResultsPayload>>({});
   const [arrived, setArrived] = useState<ReadonlySet<string>>(new Set());
   const [failed, setFailed] = useState(false);
   const [now, setNow] = useState(0);
@@ -133,7 +136,8 @@ export default function Dashboard({
           latest.current ? newlyArrived(latest.current, payload) : new Set(),
         );
         latest.current = payload;
-        setData(payload);
+        setLatestData(payload);
+        setCache((c) => ({ ...c, [payload.date]: payload }));
         setFailed(false);
         arm(payload.pollHintMs);
       } catch {
@@ -171,8 +175,44 @@ export default function Dashboard({
     };
   }, []);
 
+  // Warm the cache once: fetch the other days quietly so every tab switch
+  // after the first load is instant.
+  const warmKey = latestData?.today ?? null;
+  useEffect(() => {
+    if (!warmKey) return;
+    const dates = (latest.current?.history ?? []).map((h) => h.date);
+    const controller = new AbortController();
+    let cancelled = false;
+    (async () => {
+      for (const date of dates) {
+        if (cancelled) return;
+        if (date === latest.current?.date) continue;
+        await new Promise((r) => setTimeout(r, 400));
+        try {
+          const res = await fetch(`/api/results?date=${date}`, {
+            signal: controller.signal,
+          });
+          if (!res.ok) continue;
+          const payload = (await res.json()) as ResultsPayload;
+          if (!cancelled) {
+            setCache((c) => (c[date] ? c : { ...c, [date]: payload }));
+          }
+        } catch {
+          // best effort only
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [warmKey]);
+
+  const wanted = selected ?? latestData?.today ?? null;
+  const data = (wanted && cache[wanted]) || latestData;
+
   const isToday = data ? data.date === data.today : selected === null;
-  const switching = Boolean(data && selected && data.date !== selected);
+  const switching = Boolean(data && wanted && data.date !== wanted);
   const clock = now || (data ? Date.parse(data.serverTime) : 0);
 
   // On narrow screens one app-style screen is shown at a time. Default to the

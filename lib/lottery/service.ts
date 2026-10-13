@@ -5,7 +5,7 @@ import {
   type ShiftPrediction,
 } from "./predict.ts";
 import { fetchAllSources } from "./sources.ts";
-import { readDay, writeDraw, writePrediction } from "./store.ts";
+import { readDay, readDays, writeDraw, writePrediction } from "./store.ts";
 import { addDays } from "./time.ts";
 import type { Region, StoredDraw } from "./types.ts";
 import { mergeReports } from "./verify.ts";
@@ -79,9 +79,10 @@ export async function ensurePrediction(
   const stored = (await readDay(date)).predictions?.[shift];
   if (stored) return stored;
 
-  const days = await Promise.all(
-    Array.from({ length: STATS_DAYS }, (_, i) => readDay(addDays(date, -(i + 1)))),
+  const dates = Array.from({ length: STATS_DAYS }, (_, i) =>
+    addDays(date, -(i + 1)),
   );
+  const days = Object.values(await readDays(dates));
   const prediction = predictShift(shift, date, days);
   if (prediction) await writePrediction(prediction);
   return prediction;
